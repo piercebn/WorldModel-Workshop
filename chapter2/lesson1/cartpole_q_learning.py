@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pickle
 import time
 import sys
+import os
 
 def discretize_state(state, bins):
     """将连续状态离散化为离散状态"""
@@ -29,36 +30,66 @@ def discretize_state(state, bins):
     
     return cart_pos_idx, cart_vel_idx, pole_angle_idx, pole_vel_idx
 
-def run(is_training=True, render=True, log_details=True):
+def run(is_training=True, render=True, log_details=True, checkpoint_file='cartpole_checkpoint.pkl'):
     env = gym.make('CartPole-v1', render_mode='human' if render else None)
     
     bins = 10  # 每个状态维度的离散化数量
     
-    if is_training:
+    # 尝试加载之前的checkpoint
+    if is_training and os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'rb') as f:
+                checkpoint = pickle.load(f)
+                q = checkpoint['q_table']
+                start_episode = checkpoint['episode']
+                epsilon = checkpoint['epsilon']
+                learning_rate = checkpoint['learning_rate']
+                print(f"✅ 加载checkpoint: 从第{start_episode}回合继续训练")
+                print(f"   当前Q表状态: 平均Q值={np.mean(np.max(q, axis=-1)):.4f}")
+        except Exception as e:
+            print(f"⚠️  加载checkpoint失败: {e}, 从头开始训练")
+            q = np.zeros((bins, bins, bins, bins, env.action_space.n))
+            start_episode = 0
+            epsilon = 1.0
+            learning_rate = 0.1
+    elif is_training:
         q = np.zeros((bins, bins, bins, bins, env.action_space.n))
+        start_episode = 0
+        epsilon = 1.0
+        learning_rate = 0.1
         print("🚀 开始CartPole Q-Learning训练")
         print("="*50)
     else:
+        # 测试模式，加载训练好的模型
         try:
             with open('cartpole.pkl', 'rb') as f:
                 q = pickle.load(f)
             print("🎯 加载已训练的Q表，开始测试")
             print("="*50)
         except FileNotFoundError:
-            print("❌ 未找到训练好的模型文件 cartpole.pkl")
-            print("💡 请先运行训练模式")
+            print("❌ 未找到训练好的模型文件 'cartpole.pkl'")
+            print("请先运行训练模式")
             return
     
-    learning_rate = 0.1
     discount_factor = 0.99
-    epsilon = 1.0 if is_training else 0.0
     epsilon_decay = 0.995
     min_epsilon = 0.01
     
-    episodes = 1000 if is_training else 5
+    episodes = 50000 if is_training else 5
     rewards_per_episode = []
     
     for episode in range(episodes):
+        # 显示进度条
+        if not log_details and is_training:
+            # 计算总体进度（包括之前训练的回合数）
+            total_episodes_trained = start_episode + episode + 1
+            total_target_episodes = 50000  # 总目标回合数
+            progress = total_episodes_trained / total_target_episodes * 100
+            bar_length = 30
+            filled_length = int(bar_length * progress / 100)
+            bar = '█' * filled_length + '░' * (bar_length - filled_length)
+            print(f'\r🚀 训练进度: [{bar}] {progress:.1f}% ({total_episodes_trained}/{total_target_episodes})', end='', flush=True)
+        
         state, _ = env.reset()
         state_discrete = discretize_state(state, bins)
         total_reward = 0
@@ -141,6 +172,35 @@ def run(is_training=True, render=True, log_details=True):
             if episode % 100 == 0 and is_training:
                 avg_reward = np.mean(rewards_per_episode[-100:])
                 print(f"📈 最近100回合平均奖励: {avg_reward:.2f}")
+                
+                # 每1000回合保存一次checkpoint
+                if episode % 1000 == 0 and episode > 0:
+                    checkpoint = {
+                        'q_table': q,
+                        'episode': episode + 1,
+                        'epsilon': epsilon,
+                        'learning_rate': learning_rate,
+                        'avg_reward': avg_reward
+                    }
+                    with open(checkpoint_file, 'wb') as f:
+                        pickle.dump(checkpoint, f)
+                    print(f"💾 已保存checkpoint到 {checkpoint_file}")
+                
+                # 每100回合快速保存（防止频繁中断）
+                if episode % 100 == 0 and episode > 0:
+                    quick_checkpoint = {
+                        'q_table': q,
+                        'episode': episode + 1,
+                        'epsilon': epsilon,
+                        'learning_rate': learning_rate,
+                        'avg_reward': avg_reward
+                    }
+                    with open(checkpoint_file + '.tmp', 'wb') as f:
+                        pickle.dump(quick_checkpoint, f)
+                    # 原子性保存：先写临时文件，再重命名
+                    if os.path.exists(checkpoint_file + '.tmp'):
+                        os.rename(checkpoint_file + '.tmp', checkpoint_file)
+            
             sys.stdout.flush()
         
         # 更新epsilon
@@ -148,6 +208,10 @@ def run(is_training=True, render=True, log_details=True):
             epsilon = max(min_epsilon, epsilon * epsilon_decay)
     
     env.close()
+    
+    # 训练完成后换行，让进度条显示完整
+    if not log_details and is_training:
+        print()  # 换行
     
     # 保存训练结果
     if is_training:
@@ -198,20 +262,40 @@ if __name__ == '__main__':
     print("2. 可视化训练模式 (有可视化)")
     print("3. 仅测试模式 (需要先训练)")
     
-    try:
-        mode = int(input("请输入模式编号 (1-3): "))
-    except:
-        mode = 2  # 默认可视化训练
+    # 🚀 快速训练阶段 (无可视化，快速学习)
+    print("🚀 开始快速训练 (50000回合)...")
     
-    if mode == 1:
-        print("🚀 快速训练模式")
-        run(is_training=True, render=False, log_details=False)
-    elif mode == 2:
-        print("🎮 可视化训练模式")
-        run(is_training=True, render=True, log_details=True)
-    elif mode == 3:
-        print("🎯 测试模式")
-        run(is_training=False, render=True, log_details=True)
+    # 检查是否有之前的checkpoint
+    checkpoint_file = 'cartpole_checkpoint.pkl'
+    if os.path.exists(checkpoint_file):
+        try:
+            with open(checkpoint_file, 'rb') as f:
+                checkpoint = pickle.load(f)
+                print(f"🔍 发现之前的checkpoint: 已训练到第{checkpoint['episode']}回合")
+                print(f"   平均奖励: {checkpoint['avg_reward']:.1f}")
+                
+                # 自动继续训练，无需用户选择
+                print("✅ 自动继续之前的训练...")
+                # 计算剩余回合数
+                remaining_episodes = 50000 - checkpoint['episode']
+                if remaining_episodes > 0:
+                    print(f"📊 剩余训练回合数: {remaining_episodes}")
+                    run(is_training=True, render=False, log_details=False, checkpoint_file=checkpoint_file)
+                else:
+                    print("🎉 训练已完成！")
+        except Exception as e:
+            print(f"⚠️  加载checkpoint失败: {e}, 重新开始训练")
+            run(is_training=True, render=False, log_details=False, checkpoint_file=checkpoint_file)
     else:
-        print("❌ 无效模式，使用默认可视化训练模式")
-        run(is_training=True, render=True, log_details=True)
+        print("🆕 开始新训练...")
+        run(is_training=True, render=False, log_details=False, checkpoint_file=checkpoint_file)
+    
+    print("\n✅ 训练完成！现在开始可视化演示...")
+    input("按Enter键开始演示...")
+    
+    # 🎮 可视化演示阶段 (显示训练后的效果，不限回合数)
+    print("🎮 演示训练后的智能体表现 (不限回合数，按Ctrl+C停止)")
+    try:
+        run(is_training=False, render=True, log_details=True)
+    except KeyboardInterrupt:
+        print("\n👋 演示结束")
